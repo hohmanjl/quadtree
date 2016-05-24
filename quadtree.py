@@ -10,88 +10,56 @@ from shapely.geometry.base import BaseGeometry
 __author__ = 'Malcolm Kesson, Miklos Koren, James Hohman'
 
 
-def featurize(point):
-    # FixMe: Not sure we need an exception paradigm here.
-    try:
-        if (
-                point['type'] == 'Feature'
-                and 'geometry' in point
-                and 'properties' in point):
-            return point
-        else:
-            raise Exception
-    except:
-        try:
-            if (
-                    point['type'] == 'Point'
-                    and 'coordinates' in point):
-                return geometry_to_feature(point)
-            else:
-                raise Exception
-        except:
-            # FixMe: Not sure we need to convert to features.
-            return point_to_feature(point)
+def bbox_to_coords(bbox):
+    if len(bbox) != 4:
+        raise TypeError('bbox must have 4 coordinates.')
 
+    x0, y0, x1, y1 = bbox
 
-def geometry_to_point(geometry):
-    return tuple(geometry['coordinates'])
-
-
-def feature_to_point(feature):
-    return geometry_to_point(feature['geometry'])
-
-
-def point_to_feature(point):
-    # FixMe: Not sure we need to convert to features.
-    return {
-        "type": "Feature",
-        "geometry": {
-            "type": "Point",
-            "coordinates": list(point)
-        },
-        "properties": {
-            "name": "Dinagat Islands"
-        }
-    }
-
-
-def geometry_to_feature(geometry):
-    return {
-        "type": "Feature",
-        "geometry": geometry,
-        "properties": {
-        }
-    }
+    return [(x0, y0), (x1, y0), (x1, y1), (x0, y1)]
 
 
 def point_in_rectangle(point, rectangle):
-    x, y = point
+    if type(point) in [tuple, list]:
+        x, y = point[0], point[1]
+    else:
+        x, y = point.x, point.y
+
     x0, y0, x1, y1 = rectangle
+
     return x0 <= x <= x1 and y0 <= y <= y1
+
+
+def get_coords(point):
+    if type(point) in [list, tuple]:
+        return point[0], point[1]
+    else:
+        return point.x, point.y
 
 
 class Feature(object):
     """A wrapper around shapely geometries."""
-
     def __init__(self, geometry):
         if not isinstance(geometry, BaseGeometry):
             raise Exception
+
         self.geometry = geometry
 
     def contains_point(self, point):
         if self.geometry.is_empty:
             return False
-        pure_point = feature_to_point(featurize(point))
-        sh_point = shapelyPoint(pure_point)
+
+        sh_point = shapelyPoint(get_coords(point))
 
         return (
-            point_in_rectangle(pure_point, self.geometry.bounds)
-            and self.geometry.contains(sh_point)
+            point_in_rectangle(point, self.geometry.bounds)
+            and self.geometry.intersects(sh_point)
         )
 
     def contains_rectangle(self, rectangle):
         if self.geometry.is_empty:
             return False
+
         x0, y0, x1, y1 = rectangle
         points = [(x0, y0), (x1, y0), (x1, y1), (x0, y1)]
         sh_polygon = shapelyPolygon(points)
@@ -101,6 +69,7 @@ class Feature(object):
     def intersects_rectangle(self, rectangle):
         if self.geometry.is_empty:
             return False
+
         x0, y0, x1, y1 = rectangle
         points = [(x0, y0), (x1, y0), (x1, y1), (x0, y1)]
         sh_polygon = shapelyPolygon(points)
@@ -134,15 +103,15 @@ class Node(object):
         return points
 
     def add_point(self, point):
-        point_feature = featurize(point)
-        point = feature_to_point(point_feature)
-        if self.contains_point(point_feature):
+        # point_feature = featurize(point)
+        # point = feature_to_point(point_feature)
+        if self.point_coords_in_bbox(point):
             if self.type == Node.LEAF:
                 if point in self._points:
                     self._points[point] += 1
                 else:
                     self._points[point] = 1
-                self.features.append(point_feature)
+                self.features.append(point)
                 self.number_of_points += 1
                 if len(self._points) > self.max_points:
                     # the box is crowded, break it up in 4
@@ -150,8 +119,8 @@ class Node(object):
             else:
                 # find where the point goes
                 for child in self.children:
-                    if child.contains_point(point_feature):
-                        child.add_point(point_feature)
+                    if child.point_coords_in_bbox(point):
+                        child.add_point(point)
                         self.number_of_points += 1
                         break
         else:
@@ -205,12 +174,16 @@ class Node(object):
                 output.extend(child.get_all_points())
             return output
 
-    # Recursively subdivides a rectangle. Division occurs
-    # ONLY if the rectangle spans a "feature of interest".
     def subdivide(self):
+        """
+        Recursively subdivides a rectangle. Division occurs
+        ONLY if the rectangle spans a "feature of interest".
+        :return:
+        """
         if not self.type == Node.LEAF:
             # only leafs can be subdivided
             raise Exception
+
         features = self.features
         self._points = {}
         self.features = []
@@ -229,15 +202,25 @@ class Node(object):
             self.children.append(Node(self, rect, self.max_points))
         for point in features:
             for child in self.children:
-                if child.contains_point(point):
+                if child.point_coords_in_bbox(point):
                     child.add_point(point)
                     break
 
-    # A utility proc that returns True if the coordinates of
-    # a point are within the bounding box of the node.
-    def contains_point(self, point):
-        point = feature_to_point(featurize(point))
-        x, y = point
+    def point_coords_in_bbox(self, point):
+        """
+        Test if the point's _coordinates_ fall within the
+        Node's bounding box.
+
+        NOT whether the Point object exists within the node or not.
+
+        :param point:
+        :type point: Point class or tuple of (x, y) coordinates.
+        :return: Returns True if the coordinates lie within the
+        Node's bounding box.
+        :rtype bool:
+        """
+        x, y = get_coords(point)
+
         x0, y0, x1, y1 = self.rectangle
         if x0 <= x <= x1 and y0 <= y <= y1:
             return True
@@ -254,18 +237,63 @@ class Node(object):
                 for point in child.walk():
                     yield point
 
+    def get_bbox(self):
+        return self.rectangle
+
+
+class Point(object):
+    """
+    A point object which allows a paylood to be attached.
+    """
+    def __init__(self, x=None, y=None, data=None):
+        self.x = x
+        self.y = y
+        self.data = data
+
+    def __repr__(self):
+        return 'p(%s, %s)' % (str(self.x), str(self.y))
+
+    def __hash__(self):
+        if type(self.data) == dict:
+            data_hash = hash(frozenset(self.data.items()))
+        else:
+            data_hash = hash(self.data)
+
+        return hash((self.x, self.y, data_hash))
+
+    def __eq__(self, othr):
+        return (self.x, self.y, self.data) == (othr.x, othr.y, othr.data)
+
 
 class QuadTree(Node):
     def __init__(self, points):
-        pure_points = [feature_to_point(featurize(point)) for point in points]
-        minx = min([point[0] for point in pure_points])
-        miny = min([point[1] for point in pure_points])
-        maxx = max([point[0] for point in pure_points])
-        maxy = max([point[1] for point in pure_points])
+        # pure_points = [feature_to_point(featurize(point)) for point in points]
+
         # if a split involves 16 checks of containment, the optimal
         # number of points is 16/ln(4)
         super(QuadTree, self).__init__(
-            None, rect=(minx, miny, maxx, maxy), max_points=11
+            None, rect=self.find_bbox(points), max_points=11
         )
         for point in points:
             self.add_point(point)
+
+    @staticmethod
+    def find_bbox(points):
+        x, y = get_coords(points[0])
+        minx = x
+        maxx = x
+        miny = y
+        maxy = y
+
+        for p in points:
+            x, y = get_coords(p)
+            if x < minx:
+                minx = x
+            if x > maxx:
+                maxx = x
+            if y < miny:
+                miny = y
+            if y > maxy:
+                maxy = y
+
+        return minx, miny, maxx, maxy
